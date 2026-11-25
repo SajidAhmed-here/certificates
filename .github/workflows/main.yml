@@ -7,25 +7,68 @@ on:
   pull_request:
     branches:
       - "main"
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
+    name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.12", "3.13", "3.14", "3.15"]
     steps:
-      - uses: actions/checkout@v7
-      - name: Install uv
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install uv and select Python
         uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
-      - name: Install the project
-        run: uv sync --locked --all-extras --dev
-      - name: Run ruff format
-        run: uv run python -m ruff format  --check .
-      - name: Run ruff
-        run: uv run python -m ruff check .
-      - name: Run tests
-        run: uv run python -m pytest .
+
+      - name: Install Inkscape
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends inkscape
+          inkscape --version
+
+      - name: Install the project and development dependencies
+        run: uv sync --locked --dev
+
+      - name: Check formatting
+        run: uv run --locked python -m ruff format --check .
+
+      - name: Lint
+        run: uv run --locked python -m ruff check .
+
+      # pytest uses the coverage reports and 80% threshold in pyproject.toml.
+      - name: Run tests with coverage
+        run: uv run --locked python -m pytest
+
+      - name: Check certificate generation with Inkscape
+        run: |
+          uv run --locked certificates participants.csv template.svg --output "$RUNNER_TEMP/certificates"
+          uv run --locked python - <<'PY'
+          import os
+          from pathlib import Path
+
+          output = Path(os.environ['RUNNER_TEMP']) / 'certificates'
+          expected = {'Joe Doe.png', 'Ozzy Osbourne.png'}
+          actual = {path.name for path in output.iterdir()}
+          if actual != expected:
+              raise SystemExit(f'Unexpected generated files: {actual!r}')
+          for name in expected:
+              with (output / name).open('rb') as png:
+                  if png.read(8) != b'\x89PNG\r\n\x1a\n':
+                      raise SystemExit(f'Invalid PNG: {name}')
+          PY
+
+      - name: Build distributions
+        run: uv build
